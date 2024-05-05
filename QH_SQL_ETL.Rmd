@@ -1,0 +1,116 @@
+---
+title: "ETL PIPE"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    number_section: true
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Creating and ETL work flow
+
+# Set up the folders and paths
+
+```{r Setting up folders and paths...}
+folder <- 'RawData'
+input_files <- list.files(folder, full.names = T)
+```
+
+# Load relevant libraries
+
+```{r Loading Libraries...}
+suppressPackageStartupMessages(library(openxlsx))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(lubridate))
+suppressPackageStartupMessages(library(DBI))
+suppressPackageStartupMessages(library(RODBC))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(tidyr))
+```
+
+# Create data frame to hold extracts
+
+```{r Data frame creation...}
+holder <- data.frame()
+```
+
+# Read in all the files within a loop
+
+```{r Reading through the folder for files...}
+for (file in input_files) {
+  root_sheet <- read.xlsx(file, sheet = 'Root', colNames = T)
+  subform <- read.xlsx(file, sheet = 'subform_1', colNames = T)
+  
+  # Create a new df
+  subform_2 <- subform
+  
+  # Initiate a lookup for values
+  subform_2 <- subform_2 %>% 
+    left_join(select(root_sheet,
+                     Submission.Id,
+                     `Q1..Surveyor.-.Please.enter.your.initials.here:`,
+                     `Q3b..Boarding.Station.-.select.from.drop.down.list.provided.`,
+                     `Q4..Direction.of.Travel.-.enter.the.direction.from.the.schedule.`,
+                     `Please.enter.the.Tram.ID.no..as.shown.on.the.front.of.each.tram.you.board.`,
+                     `Boarding.Section.-.enter.the.section.between.A-J.from.your.schedule.`),
+              by = c('Submission.Id' = 'Submission.Id')) %>% 
+    select(59:63, everything())
+  
+  # Changing irregular characters - in Busaras
+  subform_2 <- subform_2 %>% mutate_all(~str_replace_all(., 'Busáras', 'Busaras'))
+  
+  # Set date & time columns into proper formats
+  subform_2$Date <- dmy(subform_2$Date)
+  subform_2$Time <- as.POSIXct(subform_2$Time, format = '%H:%M', tz = 'UTC')
+  subform_2$Time <- format(subform_2$Time, '%H:%M')
+ 
+  #Update column Names
+  Names_doc <- read.xlsx('Names.xlsx', sheet = 'Sheet2', colNames = T)
+  colnames(subform_2) <- colnames(Names_doc)
+  
+  # Update TramID to numeric & split Location to Lat & Long columns
+  subform_2$TramID <- as.numeric(as.character(subform_2$TramID))
+  subform_2 <- separate(subform_2, Location, into = c('Lat', 'Long'), sep = ',')
+  subform_2$Lat <- as.numeric(as.character(subform_2$Lat))
+  subform_2$Long <- as.numeric(as.character(subform_2$Long))
+  
+  # Create new df named Raw, remove refusals
+  Raw_tab <- subform_2 %>% 
+    filter(Ticket_View != 'Refusal') %>% 
+    select(-`7_13`)
+  
+  # Append cleaned data into holder df
+  holder <- rbind(holder, Raw_tab)
+}
+```
+
+# Set the data types for the SQL
+
+```{r Setting data types for SQL...}
+data_types <- sapply(holder, function(x) {
+  if(is.character(x)) return('varchar(100)')
+  if(is.Date(x)) return('date')
+  if(is.numeric(x)) return('float')
+})
+```
+
+# Create SQL connection & save data frame
+
+```{r Creating SQL connection & saving df...}
+Qcon <- odbcConnect('QHConnect')
+sqlSave(Qcon, holder, tablename = 'LUNAR', rownames = F, append = T, varTypes = data_types)
+```
+
+
+```{r Closing connection...}
+odbcClose(Qcon)
+print('Table update successful!')
+print('Connection closed!')
+```
+
